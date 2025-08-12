@@ -291,6 +291,502 @@ def _annotate_coding_effect(
     return out
 
 
+def _annotate_indel_effect(
+    contig: str,
+    pos1: int,
+    ref_seq: str,
+    alt_seq: str,
+    transcripts: Dict[str, TranscriptModel],
+    segments_for_contig: List[SegmentRec],
+) -> List[Dict[str, object]]:
+    """Annotate an indel using VCF-style REF/ALT sequences anchored at pos1.
+
+    Classification: frameshift vs in-frame insertion/deletion. Reports approximate
+    codon index/position at the anchor base. Does not attempt full AA reconstruction.
+    """
+    out: List[Dict[str, object]] = []
+    dlen = len(alt_seq) - len(ref_seq)
+    for rec in segments_for_contig:
+        if rec.start <= pos1 <= rec.end:
+            tm = transcripts.get(rec.transcript_id)
+            if tm is None or not tm.cds_seq:
+                continue
+
+            # Map anchor base into CDS index
+            if tm.strand == "+":
+                offset_in_seg = pos1 - rec.start
+            else:
+                offset_in_seg = rec.end - pos1
+            idx = rec.cumulative_offset + offset_in_seg
+
+            if dlen % 3 != 0:
+                effect = "frameshift"
+            else:
+                if dlen > 0:
+                    effect = "inframe_insertion"
+                elif dlen < 0:
+                    effect = "inframe_deletion"
+                else:
+                    effect = "unknown"
+
+            out.append(
+                {
+                    "is_coding": True,
+                    "gene": tm.gene,
+                    "transcript_id": tm.transcript_id,
+                    "strand": tm.strand,
+                    "codon_ref": None,
+                    "codon_alt": None,
+                    "aa_ref": None,
+                    "aa_alt": None,
+                    "codon_index": (idx // 3) + 1,
+                    "codon_pos": (idx % 3) + 1,
+                    "effect": effect,
+                }
+            )
+
+    return out
+
+
+def met_variant_alleles(
+    bam_path: str,
+    fasta_path: str,
+    gff_path: str,
+    min_base_qual: int = 20,
+    min_depth: int = 10,
+    min_map_qual: int = 0,
+    strand_bias_alpha: Optional[float] = None,
+) -> pl.DataFrame:
+    """One row per allele (including reference) per covered position.
+
+    Columns: contig, pos, var_type (REF|SNV|INS|DEL), allele_type (ref|alt),
+    ref_seq, alt_seq, depth, allele_count, allele_avgq, allele_avgmq, strand_bias_p, plus
+    coding annotation fields (is_coding, gene, transcript_id, strand, codon_* , aa_*, effect).
+    
+    If strand_bias_alpha is provided, alt alleles (SNV/INS/DEL) with Fisher's exact
+    two-sided p-value < strand_bias_alpha will be filtered out (not emitted).
+    """
+    # Load reference sequences
+    ref_seqs: Dict[str, str] = {rec.id: str(rec.seq).upper() for rec in SeqIO.parse(fasta_path, "fasta")}
+    # Build CDS models
+    transcripts, segments_by_contig = _build_transcripts(gff_path, ref_seqs)
+
+    bam = pysam.AlignmentFile(bam_path, "rb")
+    records: List[Dict[str, object]] = []
+
+    def _extract_insertion(read: pysam.AlignedSegment, ref_pos0: int, anchor_qpos: int, ins_len: int) -> Tuple[Optional[str], int, int]:
+        """Return (inserted_seq, qual_sum, n_bases) for insertion after ref_pos0 in read.
+        Uses aligned pairs to capture the inserted run immediately after the anchor.
+        """
+        try:
+            pairs = read.get_aligned_pairs(matches_only=False, with_seq=True)
+        except Exception:
+            return None, 0, 0
+        got = []
+        qsum = 0
+        n = 0
+        for i, (qpos, rpos, base) in enumerate(pairs):
+            if rpos == ref_pos0 and qpos == anchor_qpos:
+                j = i + 1
+                while j < len(pairs) and n < ins_len:
+                    q2, r2, b2 = pairs[j]
+                    if r2 is None and q2 is not None and b2 is not None:
+                        got.append(b2)
+                        if read.query_qualities is not None:
+                            qsum += int(read.query_qualities[q2])
+                        n += 1
+                    else:
+                        break
+                    j += 1
+                break
+        if n == ins_len and got:
+            return ("".join(got).upper(), qsum, n)
+        return None, 0, 0
+
+    target_contigs = [c for c in bam.references if c in ref_seqs]
+    for contig in target_contigs:
+        for puc in bam.pileup(
+            contig,
+            0,
+            len(ref_seqs[contig]),
+            truncate=True,
+            stepper="samtools",
+            min_base_quality=min_base_qual,
+        ):
+            pos1 = puc.reference_pos + 1
+            if pos1 < 1 or pos1 > len(ref_seqs[contig]):
+                continue
+            ref_base = ref_seqs[contig][pos1 - 1]
+            if ref_base not in {"A", "C", "G", "T"}:
+                continue
+
+            # Accumulators
+            base_counts: Counter = Counter()
+            base_fwd: Dict[str, int] = defaultdict(int)
+            base_rev: Dict[str, int] = defaultdict(int)
+            bq_sum: Dict[str, int] = defaultdict(int)
+            bq_n: Dict[str, int] = defaultdict(int)
+            mq_sum: Dict[str, int] = defaultdict(int)
+            mq_n: Dict[str, int] = defaultdict(int)
+
+            ins_counts: Counter = Counter()
+            ins_fwd: Dict[str, int] = defaultdict(int)
+            ins_rev: Dict[str, int] = defaultdict(int)
+            ins_qsum: Dict[str, int] = defaultdict(int)
+            ins_qn: Dict[str, int] = defaultdict(int)
+            ins_mqsum: Dict[str, int] = defaultdict(int)
+            ins_mqn: Dict[str, int] = defaultdict(int)
+
+            del_counts: Counter = Counter()
+            del_fwd: Dict[Tuple[str, str], int] = defaultdict(int)
+            del_rev: Dict[Tuple[str, str], int] = defaultdict(int)
+            del_mqsum: Dict[Tuple[str, str], int] = defaultdict(int)
+            del_mqn: Dict[Tuple[str, str], int] = defaultdict(int)
+
+            depth = 0  # number of non-refskip observations at this position
+            for pr in puc.pileups:
+                if pr.is_refskip:
+                    continue
+                read = pr.alignment
+                # Enforce minimum mapping quality
+                if read.mapping_quality is not None and int(read.mapping_quality) < min_map_qual:
+                    continue
+                depth += 1
+
+                # Deletion handling
+                # If pr.indel < 0, this column is the anchor immediately before a deletion of length k.
+                if pr.indel < 0:
+                    k = -pr.indel
+                    ref_seq = (ref_base + ref_seqs[contig][pos1 : pos1 + k]).upper()
+                    alt_seq = ref_base
+                    key = (ref_seq, alt_seq)
+                    del_counts[key] += 1
+                    if read.is_reverse:
+                        del_rev[key] += 1
+                    else:
+                        del_fwd[key] += 1
+                    # Track mapping quality for deletion-supporting reads
+                    del_mqsum[key] += int(read.mapping_quality)
+                    del_mqn[key] += 1
+                    # do not return; we still count the anchor base below
+                elif pr.is_del:
+                    # Interior of a deletion: no base or quality at this column
+                    continue
+
+                qp = pr.query_position
+                if qp is None or read.query_sequence is None:
+                    continue
+                base = read.query_sequence[qp]
+                quals = read.query_qualities
+                if quals is not None and quals[qp] < min_base_qual:
+                    continue
+                bU = base.upper()
+                if bU in {"A", "C", "G", "T"}:
+                    base_counts[bU] += 1
+                    if read.is_reverse:
+                        base_rev[bU] += 1
+                    else:
+                        base_fwd[bU] += 1
+                    if quals is not None:
+                        bq_sum[bU] += int(quals[qp])
+                        bq_n[bU] += 1
+                    # Track mapping quality per observed base
+                    mq_sum[bU] += int(read.mapping_quality)
+                    mq_n[bU] += 1
+
+                # Insertion immediately after this base
+                if pr.indel and pr.indel > 0:
+                    ins_len = pr.indel
+                    ins_seq, qsum, qn = _extract_insertion(read, puc.reference_pos, qp, ins_len)
+                    if ins_seq and len(ins_seq) == ins_len:
+                        ins_counts[ins_seq] += 1
+                        if read.is_reverse:
+                            ins_rev[ins_seq] += 1
+                        else:
+                            ins_fwd[ins_seq] += 1
+                        if qn > 0:
+                            ins_qsum[ins_seq] += qsum
+                            ins_qn[ins_seq] += qn
+                        # Track mapping quality for insertion-supporting reads
+                        ins_mqsum[ins_seq] += int(read.mapping_quality)
+                        ins_mqn[ins_seq] += 1
+
+            if depth < min_depth:
+                continue
+
+            # Reference allele row
+            ref_count = base_counts.get(ref_base, 0)
+            ref_avgq = (bq_sum[ref_base] / bq_n[ref_base]) if bq_n[ref_base] > 0 else None
+            ref_avgmq = (mq_sum[ref_base] / mq_n[ref_base]) if mq_n[ref_base] > 0 else None
+            records.append(
+                {
+                    "contig": contig,
+                    "pos": pos1,
+                    "var_type": "REF",
+                    "allele_type": "ref",
+                    "ref_seq": ref_base,
+                    "alt_seq": None,
+                    "depth": depth,
+                    "allele_count": ref_count,
+                    "allele_avgq": ref_avgq,
+                    "allele_avgmq": ref_avgmq,
+                    "strand_bias_p": None,
+                    "is_coding": False,
+                    "gene": None,
+                    "transcript_id": None,
+                    "strand": None,
+                    "codon_ref": None,
+                    "codon_alt": None,
+                    "aa_ref": None,
+                    "aa_alt": None,
+                    "codon_index": None,
+                    "codon_pos": None,
+                    "effect": None,
+                }
+            )
+
+            # SNV alt rows
+            for alt in ("A", "C", "G", "T"):
+                if alt == ref_base:
+                    continue
+                c_alt = base_counts.get(alt, 0)
+                if c_alt == 0:
+                    continue
+                alt_avgq = (bq_sum[alt] / bq_n[alt]) if bq_n[alt] > 0 else None
+                alt_avgmq = (mq_sum[alt] / mq_n[alt]) if mq_n[alt] > 0 else None
+                alt_fwd = base_fwd.get(alt, 0)
+                alt_rev = base_rev.get(alt, 0)
+                ref_fwd = base_fwd.get(ref_base, 0)
+                ref_rev = base_rev.get(ref_base, 0)
+                sb_p = _fisher_exact_two_sided(alt_fwd, alt_rev, ref_fwd, ref_rev)
+                # Filter by strand bias if requested
+                if strand_bias_alpha is not None and sb_p is not None and sb_p < strand_bias_alpha:
+                    continue
+
+                annot_list = _annotate_coding_effect(
+                    contig,
+                    pos1,
+                    alt,
+                    transcripts,
+                    segments_by_contig.get(contig, []),
+                )
+
+                if not annot_list:
+                    records.append(
+                        {
+                            "contig": contig,
+                            "pos": pos1,
+                            "var_type": "SNV",
+                            "allele_type": "alt",
+                            "ref_seq": ref_base,
+                            "alt_seq": alt,
+                            "depth": depth,
+                            "allele_count": c_alt,
+                            "allele_avgq": alt_avgq,
+                            "allele_avgmq": alt_avgmq,
+                            "strand_bias_p": sb_p,
+                            "is_coding": False,
+                            "gene": None,
+                            "transcript_id": None,
+                            "strand": None,
+                            "codon_ref": None,
+                            "codon_alt": None,
+                            "aa_ref": None,
+                            "aa_alt": None,
+                            "codon_index": None,
+                            "codon_pos": None,
+                            "effect": None,
+                        }
+                    )
+                else:
+                    for an in annot_list:
+                        records.append(
+                            {
+                                "contig": contig,
+                                "pos": pos1,
+                                "var_type": "SNV",
+                                "allele_type": "alt",
+                                "ref_seq": ref_base,
+                                "alt_seq": alt,
+                                "depth": depth,
+                                "allele_count": c_alt,
+                                "allele_avgq": alt_avgq,
+                                "allele_avgmq": alt_avgmq,
+                                "strand_bias_p": sb_p,
+                                "is_coding": an.get("is_coding", False),
+                                "gene": an.get("gene"),
+                                "transcript_id": an.get("transcript_id"),
+                                "strand": an.get("strand"),
+                                "codon_ref": an.get("codon_ref"),
+                                "codon_alt": an.get("codon_alt"),
+                                "aa_ref": an.get("aa_ref"),
+                                "aa_alt": an.get("aa_alt"),
+                                "codon_index": an.get("codon_index"),
+                                "codon_pos": an.get("codon_pos"),
+                                "effect": an.get("effect"),
+                            }
+                        )
+
+            # Insertion alt rows
+            for ins_seq, c_alt in ins_counts.items():
+                alt_avgq = (ins_qsum[ins_seq] / ins_qn[ins_seq]) if ins_qn[ins_seq] > 0 else None
+                alt_avgmq = (ins_mqsum[ins_seq] / ins_mqn[ins_seq]) if ins_mqn[ins_seq] > 0 else None
+                alt_fwd = ins_fwd.get(ins_seq, 0)
+                alt_rev = ins_rev.get(ins_seq, 0)
+                ref_fwd = base_fwd.get(ref_base, 0)
+                ref_rev = base_rev.get(ref_base, 0)
+                sb_p = _fisher_exact_two_sided(alt_fwd, alt_rev, ref_fwd, ref_rev)
+                # Filter by strand bias if requested
+                if strand_bias_alpha is not None and sb_p is not None and sb_p < strand_bias_alpha:
+                    continue
+
+                ref_seq = ref_base
+                alt_full = ref_base + ins_seq
+                annot_list = _annotate_indel_effect(
+                    contig,
+                    pos1,
+                    ref_seq,
+                    alt_full,
+                    transcripts,
+                    segments_by_contig.get(contig, []),
+                )
+
+                if not annot_list:
+                    records.append(
+                        {
+                            "contig": contig,
+                            "pos": pos1,
+                            "var_type": "INS",
+                            "allele_type": "alt",
+                            "ref_seq": ref_seq,
+                            "alt_seq": alt_full,
+                            "depth": depth,
+                            "allele_count": c_alt,
+                            "allele_avgq": alt_avgq,
+                            "strand_bias_p": sb_p,
+                            "is_coding": False,
+                            "gene": None,
+                            "transcript_id": None,
+                            "strand": None,
+                            "codon_ref": None,
+                            "codon_alt": None,
+                            "aa_ref": None,
+                            "aa_alt": None,
+                            "codon_index": None,
+                            "codon_pos": None,
+                            "effect": None,
+                        }
+                    )
+                else:
+                    for an in annot_list:
+                        records.append(
+                            {
+                                "contig": contig,
+                                "pos": pos1,
+                                "var_type": "INS",
+                                "allele_type": "alt",
+                                "ref_seq": ref_seq,
+                                "alt_seq": alt_full,
+                                "depth": depth,
+                                "allele_count": c_alt,
+                                "allele_avgq": alt_avgq,
+                                "strand_bias_p": sb_p,
+                                "is_coding": an.get("is_coding", False),
+                                "gene": an.get("gene"),
+                                "transcript_id": an.get("transcript_id"),
+                                "strand": an.get("strand"),
+                                "codon_ref": an.get("codon_ref"),
+                                "codon_alt": an.get("codon_alt"),
+                                "aa_ref": an.get("aa_ref"),
+                                "aa_alt": an.get("aa_alt"),
+                                "codon_index": an.get("codon_index"),
+                                "codon_pos": an.get("codon_pos"),
+                                "effect": an.get("effect"),
+                            }
+                        )
+
+            # Deletion alt rows
+            for (ref_seq, alt_seq), c_alt in del_counts.items():
+                alt_avgmq = (
+                    del_mqsum.get((ref_seq, alt_seq), 0) / del_mqn.get((ref_seq, alt_seq), 0)
+                    if del_mqn.get((ref_seq, alt_seq), 0) > 0
+                    else None
+                )
+                alt_fwd = del_fwd.get((ref_seq, alt_seq), 0)
+                alt_rev = del_rev.get((ref_seq, alt_seq), 0)
+                ref_fwd = base_fwd.get(ref_base, 0)
+                ref_rev = base_rev.get(ref_base, 0)
+                sb_p = _fisher_exact_two_sided(alt_fwd, alt_rev, ref_fwd, ref_rev)
+                # Filter by strand bias if requested
+                if strand_bias_alpha is not None and sb_p is not None and sb_p < strand_bias_alpha:
+                    continue
+
+                annot_list = _annotate_indel_effect(
+                    contig,
+                    pos1,
+                    ref_seq,
+                    alt_seq,
+                    transcripts,
+                    segments_by_contig.get(contig, []),
+                )
+
+                if not annot_list:
+                    records.append(
+                        {
+                            "contig": contig,
+                            "pos": pos1,
+                            "var_type": "DEL",
+                            "allele_type": "alt",
+                            "ref_seq": ref_seq,
+                            "alt_seq": alt_seq,
+                            "depth": depth,
+                            "allele_count": c_alt,
+                            "allele_avgq": None,
+                            "allele_avgmq": alt_avgmq,
+                            "strand_bias_p": sb_p,
+                            "is_coding": False,
+                            "gene": None,
+                            "transcript_id": None,
+                            "strand": None,
+                            "codon_ref": None,
+                            "codon_alt": None,
+                            "aa_ref": None,
+                            "aa_alt": None,
+                            "codon_index": None,
+                            "codon_pos": None,
+                            "effect": None,
+                        }
+                    )
+                else:
+                    for an in annot_list:
+                        records.append(
+                            {
+                                "contig": contig,
+                                "pos": pos1,
+                                "var_type": "DEL",
+                                "allele_type": "alt",
+                                "ref_seq": ref_seq,
+                                "alt_seq": alt_seq,
+                                "depth": depth,
+                                "allele_count": c_alt,
+                                "allele_avgq": None,
+                                "allele_avgmq": alt_avgmq,
+                                "strand_bias_p": sb_p,
+                                "is_coding": an.get("is_coding", False),
+                                "gene": an.get("gene"),
+                                "transcript_id": an.get("transcript_id"),
+                                "strand": an.get("strand"),
+                                "codon_ref": an.get("codon_ref"),
+                                "codon_alt": an.get("codon_alt"),
+                                "aa_ref": an.get("aa_ref"),
+                                "aa_alt": an.get("aa_alt"),
+                                "codon_index": an.get("codon_index"),
+                                "codon_pos": an.get("codon_pos"),
+                                "effect": an.get("effect"),
+                            }
+                        )
+
+    return pl.DataFrame(records)
 def met_variant(
     bam_path: str,
     fasta_path: str,

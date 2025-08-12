@@ -49,6 +49,23 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Minimum depth at a position to report variants",
     )
+    p.add_argument(
+        "--min-map-qual",
+        dest="min_map_qual",
+        type=int,
+        default=0,
+        help="Minimum mapping quality (MAPQ) to include a read",
+    )
+    p.add_argument(
+        "--strand-bias-alpha",
+        dest="strand_bias_alpha",
+        type=float,
+        default=None,
+        help=(
+            "If set, filter out alt alleles with Fisher's exact two-sided strand-bias p-value "
+            "below this alpha (e.g., 0.001)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -57,18 +74,20 @@ def main() -> int:
 
     try:
         # Import at runtime so `varmint --help` works even if deps are missing
-        from variant_funcs import met_variant  # type: ignore
+        from variant_funcs import met_variant_alleles  # type: ignore
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR importing variant_funcs: {e}\n")
         return 1
 
     try:
-        df = met_variant(
+        df = met_variant_alleles(
             bam_path=args.bam,
             fasta_path=args.fasta,
             gff_path=args.gff,
             min_base_qual=args.min_base_qual,
             min_depth=args.min_depth,
+            min_map_qual=args.min_map_qual,
+            strand_bias_alpha=args.strand_bias_alpha,
         )
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR during variant processing: {e}\n")
