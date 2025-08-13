@@ -352,6 +352,7 @@ def met_variant_alleles(
     bam_path: str,
     fasta_path: str,
     gff_path: str,
+    vcf_path: Optional[str] = None,
     min_base_qual: int = 20,
     min_depth: int = 10,
     min_map_qual: int = 0,
@@ -365,11 +366,40 @@ def met_variant_alleles(
     
     If strand_bias_alpha is provided, alt alleles (SNV/INS/DEL) with Fisher's exact
     two-sided p-value < strand_bias_alpha will be filtered out (not emitted).
+
+    If vcf_path is provided, a column `VCF_PASS` will be added that reflects the
+    FILTER field from the VCF for a matching allele at (contig, pos, ref, alt).
+    'PASS' is recorded when no filters are present; otherwise the semicolon-joined
+    list of filter names. Rows without a matching VCF allele will have VCF_PASS=None.
     """
     # Load reference sequences
     ref_seqs: Dict[str, str] = {rec.id: str(rec.seq).upper() for rec in SeqIO.parse(fasta_path, "fasta")}
     # Build CDS models
     transcripts, segments_by_contig = _build_transcripts(gff_path, ref_seqs)
+
+    # Optional: build VCF FILTER status map per allele
+    vcf_filter_map: Dict[Tuple[str, int, str, str], str] = {}
+    if vcf_path:
+        try:
+            vcf = pysam.VariantFile(vcf_path)
+            for rec in vcf:  # iterate all records
+                cont = rec.contig
+                pos1_v = int(rec.pos)
+                ref_v = (rec.ref or "").upper()
+                alts_v = [a.upper() for a in (rec.alts or [])]
+                try:
+                    filt_keys = list(rec.filter.keys())  # may be empty when PASS
+                except Exception:
+                    filt_keys = []
+                status = "PASS" if not filt_keys or "PASS" in filt_keys else ";".join(sorted(str(x) for x in filt_keys))
+                for alt_v in alts_v:
+                    vcf_filter_map[(cont, pos1_v, ref_v, alt_v)] = status
+        except Exception:
+            # If VCF cannot be read, proceed without VCF_PASS annotations
+            vcf_filter_map = {}
+
+    def _vcf_lookup(ctg: str, pos1_l: int, ref_s: str, alt_s: str) -> Optional[str]:
+        return vcf_filter_map.get((ctg, pos1_l, ref_s, alt_s))
 
     bam = pysam.AlignmentFile(bam_path, "rb")
     records: List[Dict[str, object]] = []
@@ -531,6 +561,7 @@ def met_variant_alleles(
                     "allele_avgq": ref_avgq,
                     "allele_avgmq": ref_avgmq,
                     "strand_bias_p": None,
+                    "VCF_PASS": None,
                     "is_coding": False,
                     "gene": None,
                     "transcript_id": None,
@@ -570,7 +601,7 @@ def met_variant_alleles(
                     transcripts,
                     segments_by_contig.get(contig, []),
                 )
-
+                vcf_status = _vcf_lookup(contig, pos1, ref_base, alt)
                 if not annot_list:
                     records.append(
                         {
@@ -585,6 +616,7 @@ def met_variant_alleles(
                             "allele_avgq": alt_avgq,
                             "allele_avgmq": alt_avgmq,
                             "strand_bias_p": sb_p,
+                            "VCF_PASS": vcf_status,
                             "is_coding": False,
                             "gene": None,
                             "transcript_id": None,
@@ -613,6 +645,7 @@ def met_variant_alleles(
                                 "allele_avgq": alt_avgq,
                                 "allele_avgmq": alt_avgmq,
                                 "strand_bias_p": sb_p,
+                                "VCF_PASS": vcf_status,
                                 "is_coding": an.get("is_coding", False),
                                 "gene": an.get("gene"),
                                 "transcript_id": an.get("transcript_id"),
@@ -642,6 +675,7 @@ def met_variant_alleles(
 
                 ref_seq = ref_base
                 alt_full = ref_base + ins_seq
+                vcf_status = _vcf_lookup(contig, pos1, ref_seq, alt_full)
                 annot_list = _annotate_indel_effect(
                     contig,
                     pos1,
@@ -663,7 +697,9 @@ def met_variant_alleles(
                             "depth": depth,
                             "allele_count": c_alt,
                             "allele_avgq": alt_avgq,
+                            "allele_avgmq": alt_avgmq,
                             "strand_bias_p": sb_p,
+                            "VCF_PASS": vcf_status,
                             "is_coding": False,
                             "gene": None,
                             "transcript_id": None,
@@ -690,7 +726,9 @@ def met_variant_alleles(
                                 "depth": depth,
                                 "allele_count": c_alt,
                                 "allele_avgq": alt_avgq,
+                                "allele_avgmq": alt_avgmq,
                                 "strand_bias_p": sb_p,
+                                "VCF_PASS": vcf_status,
                                 "is_coding": an.get("is_coding", False),
                                 "gene": an.get("gene"),
                                 "transcript_id": an.get("transcript_id"),
@@ -721,6 +759,7 @@ def met_variant_alleles(
                 if strand_bias_alpha is not None and sb_p is not None and sb_p < strand_bias_alpha:
                     continue
 
+                vcf_status = _vcf_lookup(contig, pos1, ref_seq, alt_seq)
                 annot_list = _annotate_indel_effect(
                     contig,
                     pos1,
@@ -744,6 +783,7 @@ def met_variant_alleles(
                             "allele_avgq": None,
                             "allele_avgmq": alt_avgmq,
                             "strand_bias_p": sb_p,
+                            "VCF_PASS": vcf_status,
                             "is_coding": False,
                             "gene": None,
                             "transcript_id": None,
@@ -772,6 +812,7 @@ def met_variant_alleles(
                                 "allele_avgq": None,
                                 "allele_avgmq": alt_avgmq,
                                 "strand_bias_p": sb_p,
+                                "VCF_PASS": vcf_status,
                                 "is_coding": an.get("is_coding", False),
                                 "gene": an.get("gene"),
                                 "transcript_id": an.get("transcript_id"),
@@ -786,252 +827,13 @@ def met_variant_alleles(
                             }
                         )
 
-    return pl.DataFrame(records)
-def met_variant(
-    bam_path: str,
-    fasta_path: str,
-    gff_path: str,
-    min_base_qual: int = 20,
-    min_depth: int = 10,
-) -> pl.DataFrame:
-    """Compute allele frequencies per covered position and annotate coding effects.
-
-    Parameters
-    ----------
-    bam_path : str
-        Path to coordinate-sorted, indexed BAM file (.bam + .bai).
-    fasta_path : str
-        Reference genome FASTA used for alignment.
-    gff_path : str
-        Gene feature table (GFF3/GTF-like). CDS features are used for annotation.
-    min_base_qual : int, optional
-        Minimum base quality (Phred) to include a read base in counts. Default 20.
-    min_depth : int, optional
-        Minimum depth at a position to report allele frequencies. Default 10.
-
-    Returns
-    -------
-    polars.DataFrame
-        One row per detected alt allele (SNV) meeting thresholds, with allele
-        frequency and coding consequence annotations when applicable.
-        Includes per-allele average base qualities (avgq_A, avgq_C, avgq_G, avgq_T)
-        at each reported position, computed over bases that pass filtering.
-        A row is also emitted for positions with sufficient coverage even when
-        no alternate allele is observed (reference-only sites; alt=None, af=0).
-    """
-
-    # Load reference sequences (upper-case strings)
-    ref_seqs: Dict[str, str] = {rec.id: str(rec.seq).upper() for rec in SeqIO.parse(fasta_path, "fasta")}
-
-    # Build CDS transcript models and a per-contig segment index
-    transcripts, segments_by_contig = _build_transcripts(gff_path, ref_seqs)
-
-    # Open BAM
-    bam = pysam.AlignmentFile(bam_path, "rb")
-
-    records: List[Dict[str, object]] = []
-
-    target_contigs = [c for c in bam.references if c in ref_seqs]
-    for contig in target_contigs:
-        # Iterate covered positions using pileup
-        for puc in bam.pileup(
-            contig,
-            0,
-            len(ref_seqs[contig]),
-            truncate=True,
-            stepper="samtools",
-            min_base_quality=min_base_qual,
-        ):
-            pos1 = puc.reference_pos + 1  # convert to 1-based
-            if pos1 < 1 or pos1 > len(ref_seqs[contig]):
-                continue
-            ref_base = ref_seqs[contig][pos1 - 1]
-            if ref_base not in {"A", "C", "G", "T"}:
-                # Skip ambiguous reference bases
-                continue
-
-            counts: Counter = Counter()
-            base_fwd: Dict[str, int] = defaultdict(int)
-            base_rev: Dict[str, int] = defaultdict(int)
-            # Track summed qualities and counts per base to compute averages
-            qual_sums: Dict[str, int] = defaultdict(int)
-            qual_ns: Dict[str, int] = defaultdict(int)
-            # Count bases meeting quality and not del/refskip
-            for pr in puc.pileups:
-                if pr.is_del or pr.is_refskip:
-                    continue
-                qp = pr.query_position
-                if qp is None:
-                    continue
-                seq = pr.alignment.query_sequence
-                if seq is None:
-                    continue
-                base = seq[qp]
-                # Extra guard on base quality (min_base_quality already used in pileup)
-                quals = pr.alignment.query_qualities
-                if quals is not None and quals[qp] < min_base_qual:
-                    continue
-                bU = base.upper()
-                if bU in {"A", "C", "G", "T"}:
-                    counts[bU] += 1
-                    if pr.alignment.is_reverse:
-                        base_rev[bU] += 1
-                    else:
-                        base_fwd[bU] += 1
-                    if quals is not None:
-                        # Accumulate qualities for average calculations
-                        qual_sums[bU] += int(quals[qp])
-                        qual_ns[bU] += 1
-
-            depth = sum(counts.get(b, 0) for b in ("A", "C", "G", "T"))
-            if depth < min_depth:
-                continue
-
-            # Compute average qualities per nucleotide (None if no qualifying observations)
-            avgq_A = (qual_sums["A"] / qual_ns["A"]) if qual_ns["A"] > 0 else None
-            avgq_C = (qual_sums["C"] / qual_ns["C"]) if qual_ns["C"] > 0 else None
-            avgq_G = (qual_sums["G"] / qual_ns["G"]) if qual_ns["G"] > 0 else None
-            avgq_T = (qual_sums["T"] / qual_ns["T"]) if qual_ns["T"] > 0 else None
-
-            # If no alt alleles observed (all reads agree with reference), emit one row
-            has_alt = any(alt != ref_base and counts.get(alt, 0) > 0 for alt in ("A", "C", "G", "T"))
-            if not has_alt:
-                ref_fwd = base_fwd.get(ref_base, 0)
-                ref_rev = base_rev.get(ref_base, 0)
-                records.append(
-                    {
-                        "contig": contig,
-                        "pos": pos1,
-                        "ref": ref_base,
-                        "alt": None,
-                        "depth": depth,
-                        "ref_count": counts.get(ref_base, 0),
-                        "alt_count": 0,
-                        "af": 0.0,
-                        "count_A": counts.get("A", 0),
-                        "count_C": counts.get("C", 0),
-                        "count_G": counts.get("G", 0),
-                        "count_T": counts.get("T", 0),
-                        "avgq_A": avgq_A,
-                        "avgq_C": avgq_C,
-                        "avgq_G": avgq_G,
-                        "avgq_T": avgq_T,
-                        "ref_fwd": ref_fwd,
-                        "ref_rev": ref_rev,
-                        "alt_fwd": 0,
-                        "alt_rev": 0,
-                        "strand_bias_p": None,
-                        "is_coding": False,
-                        "gene": None,
-                        "transcript_id": None,
-                        "strand": None,
-                        "codon_ref": None,
-                        "codon_alt": None,
-                        "aa_ref": None,
-                        "aa_alt": None,
-                        "codon_index": None,
-                        "codon_pos": None,
-                        "effect": None,
-                    }
-                )
-
-            # Produce one row per alt allele observed
-            for alt in ("A", "C", "G", "T"):
-                c_alt = counts.get(alt, 0)
-                if alt == ref_base or c_alt == 0:
-                    continue
-                af = c_alt / depth if depth > 0 else 0.0
-                # Strand-specific counts and Fisher exact test
-                alt_fwd = base_fwd.get(alt, 0)
-                alt_rev = base_rev.get(alt, 0)
-                ref_fwd = base_fwd.get(ref_base, 0)
-                ref_rev = base_rev.get(ref_base, 0)
-                sb_p = _fisher_exact_two_sided(alt_fwd, alt_rev, ref_fwd, ref_rev)
-
-                # Coding consequence annotations (possibly multiple overlapping CDS)
-                annot_list = _annotate_coding_effect(
-                    contig,
-                    pos1,
-                    alt,
-                    transcripts,
-                    segments_by_contig.get(contig, []),
-                )
-
-                if not annot_list:
-                    # Intergenic or non-CDS
-                    records.append(
-                        {
-                            "contig": contig,
-                            "pos": pos1,
-                            "ref": ref_base,
-                            "alt": alt,
-                            "depth": depth,
-                            "ref_count": counts.get(ref_base, 0),
-                            "alt_count": c_alt,
-                            "af": af,
-                            "count_A": counts.get("A", 0),
-                            "count_C": counts.get("C", 0),
-                            "count_G": counts.get("G", 0),
-                            "count_T": counts.get("T", 0),
-                            "avgq_A": avgq_A,
-                            "avgq_C": avgq_C,
-                            "avgq_G": avgq_G,
-                            "avgq_T": avgq_T,
-                            "ref_fwd": ref_fwd,
-                            "ref_rev": ref_rev,
-                            "alt_fwd": alt_fwd,
-                            "alt_rev": alt_rev,
-                            "strand_bias_p": sb_p,
-                            "is_coding": False,
-                            "gene": None,
-                            "transcript_id": None,
-                            "strand": None,
-                            "codon_ref": None,
-                            "codon_alt": None,
-                            "aa_ref": None,
-                            "aa_alt": None,
-                            "codon_index": None,
-                            "codon_pos": None,
-                            "effect": None,
-                        }
-                    )
-                else:
-                    for an in annot_list:
-                        records.append(
-                            {
-                                "contig": contig,
-                                "pos": pos1,
-                                "ref": ref_base,
-                                "alt": alt,
-                                "depth": depth,
-                                "ref_count": counts.get(ref_base, 0),
-                                "alt_count": c_alt,
-                                "af": af,
-                                "count_A": counts.get("A", 0),
-                                "count_C": counts.get("C", 0),
-                                "count_G": counts.get("G", 0),
-                                "count_T": counts.get("T", 0),
-                                "avgq_A": avgq_A,
-                                "avgq_C": avgq_C,
-                                "avgq_G": avgq_G,
-                                "avgq_T": avgq_T,
-                                "ref_fwd": ref_fwd,
-                                "ref_rev": ref_rev,
-                                "alt_fwd": alt_fwd,
-                                "alt_rev": alt_rev,
-                                "strand_bias_p": sb_p,
-                                "is_coding": an.get("is_coding", False),
-                                "gene": an.get("gene"),
-                                "transcript_id": an.get("transcript_id"),
-                                "strand": an.get("strand"),
-                                "codon_ref": an.get("codon_ref"),
-                                "codon_alt": an.get("codon_alt"),
-                                "aa_ref": an.get("aa_ref"),
-                                "aa_alt": an.get("aa_alt"),
-                                "codon_index": an.get("codon_index"),
-                                "codon_pos": an.get("codon_pos"),
-                                "effect": an.get("effect"),
-                            }
-                        )
-
-    return pl.DataFrame(records)
+    # Ensure consistent schema for optional VCF_PASS (may be Null for many rows).
+    # Increase schema inference length so Polars sees string values and infers Utf8,
+    # then explicitly cast VCF_PASS to Utf8 with nulls allowed.
+    if records:
+        df = pl.DataFrame(records, infer_schema_length=len(records))
+    else:
+        df = pl.DataFrame(records)
+    if "VCF_PASS" in df.columns:
+        df = df.with_columns(pl.col("VCF_PASS").cast(pl.Utf8))
+    return df

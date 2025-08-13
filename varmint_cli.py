@@ -2,7 +2,7 @@
 varmint CLI entry point.
 
 This module exposes `main()` which is wired to the console script in pyproject.toml.
-It calls `met_variant` and writes a TSV file.
+writes TSV table.
 """
 from __future__ import annotations
 
@@ -17,11 +17,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="varmint",
         description=(
-            "Compute allele frequencies from a BAM against a FASTA and annotate coding "
-            "effects using a GFF (CDS). Outputs a TSV table."
+            "Variant/allele table generation and coding-effect annotation from BAM and VCF. "
+            "Outputs TSV tables."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
     p.add_argument("-b", "--bam", required=True, help="Input BAM file (coordinate-sorted, indexed)")
     p.add_argument(
         "-r",
@@ -33,6 +34,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("-g", "--gff", required=True, help="GFF file with CDS features for annotation")
     p.add_argument("-o", "--out", required=True, help="Output TSV path")
+    p.add_argument(
+        "-v", 
+        "--vcf", 
+        type=str, 
+        default=None,
+        help="Input VCF/BCF with variants"
+    )
     p.add_argument(
         "-q",
         "--min-base-qual",
@@ -46,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--min-depth",
         dest="min_depth",
         type=int,
-        default=10,
+        default=1,
         help="Minimum depth at a position to report variants",
     )
     p.add_argument(
@@ -66,15 +74,16 @@ def parse_args() -> argparse.Namespace:
             "below this alpha (e.g., 0.001)."
         ),
     )
-    return p.parse_args()
 
+    return p.parse_args()
 
 def main() -> int:
     args = parse_args()
 
+
     try:
         # Import at runtime so `varmint --help` works even if deps are missing
-        from variant_funcs import met_variant_alleles  # type: ignore
+        from variant_funcs import met_variant_alleles, vcf_variants, met_variant_vcf_alleles  # type: ignore
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR importing variant_funcs: {e}\n")
         return 1
@@ -84,6 +93,7 @@ def main() -> int:
             bam_path=args.bam,
             fasta_path=args.fasta,
             gff_path=args.gff,
+            vcf_path=args.vcf,
             min_base_qual=args.min_base_qual,
             min_depth=args.min_depth,
             min_map_qual=args.min_map_qual,
