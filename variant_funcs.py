@@ -381,6 +381,12 @@ def met_variant_alleles(
     vcf_filter_map: Dict[Tuple[str, int, str, str], str] = {}
     if vcf_path:
         try:
+            # Suppress noisy htslib warnings (e.g., contig not defined in header)
+            # while parsing VCF. This affects global htslib logging in this process.
+            try:
+                pysam.set_verbosity(0)
+            except Exception:
+                pass
             vcf = pysam.VariantFile(vcf_path)
             for rec in vcf:  # iterate all records
                 cont = rec.contig

@@ -83,7 +83,7 @@ def main() -> int:
 
     try:
         # Import at runtime so `varmint --help` works even if deps are missing
-        from variant_funcs import met_variant_alleles, vcf_variants, met_variant_vcf_alleles  # type: ignore
+        from variant_funcs import met_variant_alleles
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR importing variant_funcs: {e}\n")
         return 1
