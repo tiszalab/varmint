@@ -4,7 +4,7 @@ Sequence variant processor: compute allele frequencies from BAM against FASTA an
 
 **USE CASES:** Small genomes, like viruses or plasmids. `varmint` readily handles multiple segments or contigs from a reference .fasta and .gff.
 
-This software package likely handle bacterial genomes (1-10 MB in size) without issue, but it hasn't been tested.
+This software package will likely handle bacterial genomes (1-10 MB in size) without issue, but it hasn't been tested.
 
 ## Quick install with `pip`
 
