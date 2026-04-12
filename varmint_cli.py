@@ -74,6 +74,28 @@ def parse_args() -> argparse.Namespace:
             "below this alpha (e.g., 0.001)."
         ),
     )
+    p.add_argument(
+        "-t",
+        "--threads",
+        dest="threads",
+        type=int,
+        default=1,
+        help="Number of parallel threads to use for processing (default: 1)",
+    )
+    p.add_argument(
+        "--consensus",
+        dest="consensus",
+        type=str,
+        default=None,
+        help="Optional path to write consensus FASTA file",
+    )
+    p.add_argument(
+        "--consensus-af",
+        dest="consensus_af",
+        type=float,
+        default=0.5,
+        help="Allele frequency threshold for consensus IUPAC ambiguity codes (default: 0.5)",
+    )
 
     return p.parse_args()
 
@@ -84,6 +106,7 @@ def main() -> int:
     try:
         # Import at runtime so `varmint --help` works even if deps are missing
         from variant_funcs import met_variant_alleles
+        from consensus_funcs import write_consensus_fasta
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR importing variant_funcs: {e}\n")
         return 1
@@ -98,6 +121,7 @@ def main() -> int:
             min_depth=args.min_depth,
             min_map_qual=args.min_map_qual,
             strand_bias_alpha=args.strand_bias_alpha,
+            threads=args.threads,
         )
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR during variant processing: {e}\n")
@@ -110,6 +134,21 @@ def main() -> int:
         return 2
 
     sys.stdout.write(f"{MSG_PREFIX} Wrote {len(df)} rows to {args.out}\n")
+
+    # Optional consensus FASTA output
+    if args.consensus:
+        try:
+            write_consensus_fasta(
+                df=df,
+                fasta_path=args.fasta,
+                output_path=args.consensus,
+                af_threshold=args.consensus_af,
+            )
+            sys.stdout.write(f"{MSG_PREFIX} Wrote consensus FASTA to {args.consensus}\n")
+        except Exception as e:
+            sys.stderr.write(f"{MSG_PREFIX} ERROR writing consensus FASTA: {e}\n")
+            return 3
+
     return 0
 
 
