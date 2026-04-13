@@ -203,10 +203,11 @@ def _build_transcripts(
         )
         cum = 0
         seg_recs: List[SegmentRec] = []
+        composite_key = (contig, tid)
         for idx, (s, e, _st, _gn) in enumerate(segs_for_offsets):
             seg_rec = SegmentRec(
                 contig=contig,
-                transcript_id=tid,
+                transcript_id=composite_key,
                 gene=gene_name,
                 start=s,
                 end=e,
@@ -219,7 +220,6 @@ def _build_transcripts(
             segments_by_contig[contig].append(seg_rec)
             seg_recs.append(seg_rec)
 
-        composite_key = (contig, tid)
         tm = TranscriptModel(
             contig=contig,
             transcript_id=composite_key,
@@ -290,7 +290,7 @@ def _annotate_coding_effect(
                 {
                     "is_coding": True,
                     "gene": tm.gene,
-                    "transcript_id": tm.transcript_id,
+                    "transcript_id": tm.transcript_id[1],  # Extract tid from (contig, tid) composite key
                     "strand": tm.strand,
                     "codon_ref": codon_ref,
                     "codon_alt": codon_alt,
@@ -349,7 +349,7 @@ def _annotate_indel_effect(
                 {
                     "is_coding": True,
                     "gene": tm.gene,
-                    "transcript_id": tm.transcript_id,
+                    "transcript_id": tm.transcript_id[1],  # Extract tid from (contig, tid) composite key
                     "strand": tm.strand,
                     "codon_ref": None,
                     "codon_alt": None,
