@@ -111,15 +111,35 @@ def write_consensus_fasta(
             consensus_chars = []
             ref_len = len(ref_seqs[contig_id])
             
-            # Group by position
-            pos_groups = contig_df.group_by("pos")
-            pos_dict: Dict[int, pl.DataFrame] = {}
-            for pos, group in pos_groups:
-                pos_dict[pos] = group
+            # Get all positions that have data as a sorted list of Python ints
+            positions_with_data = contig_df["pos"].unique().to_list()
+            positions_set = set(int(p) for p in positions_with_data)
             
+            # Create a list of (pos, df) pairs
+            # Polars group_by yields (key_tuple, group_df) where key_tuple
+            # is a tuple even for single-column groupby, e.g. (123,)
+            pos_groups_list = []
+            for key, group in contig_df.group_by("pos"):
+                pos_int = int(key[0]) if isinstance(key, tuple) else int(key)
+                pos_groups_list.append((pos_int, group))
+            # Sort by position for efficient scanning
+            pos_groups_list.sort(key=lambda x: x[0])
+            
+            # Build consensus sequence
+            group_idx = 0
             for pos in range(1, ref_len + 1):
-                if pos in pos_dict:
-                    base = _get_majority_base(pos_dict[pos], af_threshold)
+                # Fast path: check if position has data using Python int set
+                if pos not in positions_set:
+                    consensus_chars.append("N")
+                    continue
+                
+                # Find the matching group (should be at or near current index)
+                while group_idx < len(pos_groups_list) and pos_groups_list[group_idx][0] < pos:
+                    group_idx += 1
+                
+                if group_idx < len(pos_groups_list) and pos_groups_list[group_idx][0] == pos:
+                    _, pos_df = pos_groups_list[group_idx]
+                    base = _get_majority_base(pos_df, af_threshold)
                     consensus_chars.append(base)
                 else:
                     consensus_chars.append("N")  # No coverage
