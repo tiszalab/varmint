@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "varmint"
-version = "0.1.0"
+version = "0.2.0"
 description = "Metagenome variant processor: allele frequencies and coding effects"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-  { name = "varmint authors" }
+  { name = "Michael Tisza" }
 ]
 keywords = ["metagenomics", "variants", "bioinformatics", "SNP", "GFF", "BAM", "FASTA"]
 classifiers = [
@@ -35,4 +35,5 @@ varmint = "varmint_cli:main"
 include = [
   "varmint_cli.py",
   "variant_funcs.py",
+  "consensus_funcs.py",
 ]

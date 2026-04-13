@@ -61,13 +61,42 @@ varmint \
   --bam sample.bam \
   --ref reference.fasta \
   --gff genes.gff \
-  --vcf variants.vcf
+  --vcf variants.vcf \
   --out variant_stats.tsv \
   --min-base-qual 20 \
   --min-depth 10
 ```
 
 **Ensure your BAM is coordinate-sorted and indexed (`.bai`).**
+
+### Parallel Processing
+
+Use the `--threads` flag to process contigs in parallel for faster execution on multi-core systems:
+
+```bash
+varmint \
+  --bam sample.bam \
+  --ref reference.fasta \
+  --gff genes.gff \
+  --out variants.tsv \
+  --threads 4
+```
+
+### Consensus FASTA Output
+
+Generate a consensus FASTA file alongside the TSV output:
+
+```bash
+varmint \
+  --bam sample.bam \
+  --ref reference.fasta \
+  --gff genes.gff \
+  --out variants.tsv \
+  --consensus consensus.fasta \
+  --consensus-af 0.5
+```
+
+The `--consensus-af` threshold determines when to use IUPAC ambiguity codes (default: 0.5). Positions with no coverage are filled with `N`.
 
 ## Output Data Dictionary
 
@@ -83,7 +112,13 @@ varmint \
 | allele_count | int or null | Number of reads supporting this allele (for REF rows, count of the reference base). |
 | allele_avgq | float or null | Mean base quality of bases supporting this allele (available for SNVs and insertions; deletions are null). |
 | allele_avgmq | float or null | Mean mapping quality of reads supporting this allele. |
-| strand_bias_p | float or null | Fisher’s exact two-sided p-value for strand bias of the alt vs ref (null for ref rows or insufficient data). |
+| strand_bias_p | float or null | Fisher's exact two-sided p-value for strand bias of the alt vs ref (null for ref rows or insufficient data). |
+| ref_fwd | int or null | Forward-strand reads supporting the reference allele. |
+| ref_rev | int or null | Reverse-strand reads supporting the reference allele. |
+| alt_fwd | int or null | Forward-strand reads supporting the alternate allele (null for REF rows). |
+| alt_rev | int or null | Reverse-strand reads supporting the alternate allele (null for REF rows). |
+| AF | float or null | Allele frequency (allele_count / depth). |
+| ts_tv | str or null | For SNVs: "Ts" (transition) or "Tv" (transversion). Null for indels and reference rows. |
 | VCF_PASS | str or null | From input VCF FILTER for matching (contig, pos, ref, alt): "PASS" or semicolon-joined filter names. Null if no matching VCF allele or when no VCF provided. |
 | is_coding | bool | True if allele overlaps a CDS feature. |
 | gene | str or null | Gene name/ID for overlapping CDS (if available). |
