@@ -96,6 +96,13 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Allele frequency threshold for consensus IUPAC ambiguity codes (default: 0.5)",
     )
+    p.add_argument(
+        "--consensus-aa",
+        dest="consensus_aa",
+        type=str,
+        default=None,
+        help="Optional path to write consensus amino acid FASTA for coding regions",
+    )
 
     return p.parse_args()
 
@@ -106,7 +113,7 @@ def main() -> int:
     try:
         # Import at runtime so `varmint --help` works even if deps are missing
         from variant_funcs import met_variant_alleles
-        from consensus_funcs import write_consensus_fasta
+        from consensus_funcs import write_consensus_fasta, write_consensus_aa_fasta
     except Exception as e:
         sys.stderr.write(f"{MSG_PREFIX} ERROR importing variant_funcs: {e}\n")
         return 1
@@ -148,6 +155,21 @@ def main() -> int:
         except Exception as e:
             sys.stderr.write(f"{MSG_PREFIX} ERROR writing consensus FASTA: {e}\n")
             return 3
+
+    # Optional consensus amino acid FASTA output
+    if args.consensus_aa:
+        try:
+            write_consensus_aa_fasta(
+                df=df,
+                fasta_path=args.fasta,
+                gff_path=args.gff,
+                output_path=args.consensus_aa,
+                af_threshold=args.consensus_af,
+            )
+            sys.stdout.write(f"{MSG_PREFIX} Wrote consensus AA FASTA to {args.consensus_aa}\n")
+        except Exception as e:
+            sys.stderr.write(f"{MSG_PREFIX} ERROR writing consensus AA FASTA: {e}\n")
+            return 4
 
     return 0
 
