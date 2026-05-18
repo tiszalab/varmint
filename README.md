@@ -6,6 +6,10 @@ Sequence variant processor: compute allele frequencies from BAM against FASTA an
 
 This software package will likely handle bacterial genomes (1-10 MB in size) without issue, but it hasn't been tested.
 
+> NOTE: This is a foray into LLM-driven coding. I (MJT) hardly wrote any code.
+> That said, I think the codebase is quite robust.
+> Please consider this extremely open source and PRs are more than welcome.
+
 ## Quick install with `pip`
 
 *This will not install dependencies*
