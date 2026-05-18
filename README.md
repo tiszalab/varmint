@@ -1,4 +1,4 @@
-# varmint
+# varmint 🦝
 
 Sequence variant processor: compute allele frequencies from BAM against FASTA and annotate coding effects using GFF CDS features. Add a VCF to report on "statistically significant" variants from your favorite variant caller.
 
