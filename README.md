@@ -10,16 +10,40 @@ This software package will likely handle bacterial genomes (1-10 MB in size) wit
 > That said, I think the codebase is quite robust.
 > Please consider this extremely open source and PRs are more than welcome.
 
-## Quick install with `pip`
+## Install from the latest release
 
-*This will not install dependencies*
+Install directly from the v0.2.0 release tarball (no git clone required):
 
-*This will install `varmint` into whichever environment (e.g. conda env) that you are in.*
+```bash
+pip install https://github.com/tiszalab/varmint/archive/refs/tags/v0.2.0.tar.gz
+```
 
-Dependencies:
+or with `uv` (installs as a persistent tool):
+
+```bash
+uv tool install https://github.com/tiszalab/varmint/archive/refs/tags/v0.2.0.tar.gz
+```
+
+or run directly without a persistent install:
+
+```bash
+uv run --with https://github.com/tiszalab/varmint/archive/refs/tags/v0.2.0.tar.gz varmint [args...]
+```
+
+Test that `varmint` is accessible:
+
+```bash
+varmint -h
+```
+
+Dependencies (installed automatically):
 - polars (DataFrame/TSV)
 - pysam (BAM pileups)
 - biopython (FASTA/GFF parsing, translation)
+
+## Install from a local clone
+
+*This will install `varmint` into whichever environment (e.g. conda env) that you are in.*
 
 ```bash
 cd /path/to/varmint/
@@ -27,13 +51,7 @@ cd /path/to/varmint/
 pip install .
 ```
 
-test that `varmint` is accessible now.
-
-```bash
-varmint -h
-```
-
-## Install/run with `uv`
+### Install/run with `uv` (local)
 
 Option A: Install as a tool (adds `varmint` to your PATH)
 
