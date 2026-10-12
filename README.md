@@ -37,7 +37,7 @@ varmint -h
 ```
 
 Dependencies (installed automatically):
-- polars (DataFrame/TSV)
+- polars 1.x or 2.x (DataFrame/TSV)
 - pysam (BAM pileups)
 - biopython (FASTA/GFF parsing, translation)
 
